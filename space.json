@@ -10,7 +10,7 @@
         "flickr": "http://www.flickr.com/groups/farset_labs/", 
         "irc": "irc://irc.freenode.net/#farsetlabs", 
         "twitter": "@farsetlabs", 
-        "wiki": "http://unit1.farsetlabs.org.uk/wiki/"
+        "wiki": "http://unit1.farsetlabs.org.uk/wiki/",
         "phone": "+448458694619"
     }, 
     "icon": {
@@ -25,5 +25,6 @@
     "open": true, 
     "space": "Farset Labs", 
     "status": "Open", 
-    "url": "http://www.farsetlabs.org.uk"
+    "url": "http://www.farsetlabs.org.uk",
+    "botname": "FarBot"
 }
