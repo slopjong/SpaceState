@@ -1,0 +1,9 @@
+#!/usr/bin/env python
+import cgi
+import simplejson
+
+print "Content-Type: text/json\n"
+content=simplejson.load(open("/opt/etc/spaceapid/farsetlabs.json",'r'))
+
+
+print simplejson.dumps(content)
