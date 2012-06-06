@@ -33,4 +33,6 @@ nosetests.xml
 .mr.developer.cfg
 
 #custom stuff
-tweet.json
+.json
+*_auth.json
+*.log

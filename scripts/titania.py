@@ -6,7 +6,7 @@ from twisted.internet import reactor, protocol, task
 from twisted.python import log
 
 # system imports
-import time, sys, string, os
+import time, sys, string, os, pprint
 from datetime import datetime as dt
 from urlparse import urlparse
 
@@ -14,7 +14,7 @@ from urlparse import urlparse
 import k8055
 import simplejson
 import argparse
-import oauth
+import oauth.oauth as oauth
 from twittytwister import twitter
 
 class MessageLogger:
@@ -37,7 +37,6 @@ class MessageLogger:
 
 class IRCBot(irc.IRCClient):
     """A logging IRC bot."""
-
 
     def connectionMade(self):
         irc.IRCClient.connectionMade(self)
@@ -70,6 +69,39 @@ class IRCBot(irc.IRCClient):
         """This will get called when the bot joins the channel."""
         self.logger.log("[I have joined %s]" % channel)
 
+    def on_pm(self, user, channel, msg):
+        if user not in self.space.admins:
+            response = "Hello, I'm the IRC bot for %s" % self.space.name
+        # Allow authenticated users (see --admin flag) to tweet
+        elif msg.startswith("tweet"):
+            txt = "%s said: %s"%(user,string.join(msg.split()[1:]).strip())
+            if self.space.twitter:
+                if user in self.space.admins:
+                    self.space.twitter.tweet(txt)
+                    response = "tweet \"%s\" successful"%txt
+                else:
+                    response = "You attemped an unauthorised command. Please don't do that. Thank you."
+            else:
+                response = "failed, twitter not configured"
+        else:
+            response = "Successfully authenticated: %s"%(pprint.pformat(self.space.config))
+
+        self.logged_msg(user,response)
+
+    def on_msg(self,user,channel,cmd):
+        #lose my nick, weird whitespace, and lower for ease of comp
+        cmd_l =  ":".join(cmd.split(':')[1:]).strip().lower()
+        if cmd_l.startswith("is the space"):
+            if cmd_l.split()[3].split('?')[0] not in ["open","closed"]:
+                response = "Stop being a smart arse, the space is either 'open' or 'closed'"
+            else:
+                response = "The space is %s" % (self.space.status())
+        else:
+            response = "Sorry, don't know what to do with that"
+
+        msg="%s: %s"%(user,response)
+        self.logged_msg(channel, msg)
+
     def privmsg(self, user, channel, msg):
         """This will get called when the bot receives a message."""
         user = user.split('!', 1)[0]
@@ -77,31 +109,22 @@ class IRCBot(irc.IRCClient):
 
         # Check to see if they're sending me a private message
         if channel == self.nickname:
-            msg = "Hello, I'm the IRC bot for %s" % self.space.name
-            self.logged_msg(user, msg)
+            self.on_pm(user,channel,msg)
             return
 
         # Check to see if they're asking me for help
-        if msg == self.nickname + ": help":
+        if msg.startswith(self.nickname + ": help"):
             msg = "%s: I'm a little stupid at the minute; current commands I accept are:" % user
             self.logged_msg(channel, msg)
-            msg = "%s: open" % self.nickname
+            msg = "%s: is the space open?" % self.nickname
             self.logged_msg(channel, msg)
             return
 
-        # Check to see if the hackerspace is open
-        if msg == self.nickname + ": open":
-            msg = "%s: The space is %s" % ( user , self.space.status())
-            self.logged_msg(channel, msg)
+        # If its a message directed at me, deal with it
+        if msg.startswith(self.nickname + ":"):
+            self.on_msg(user, channel,msg)
+            return
 
-        # Otherwise check to see if it is a message directed at me
-        if msg.startswith(self.nickname + ": tweet "):
-            txt = "%s said: %s"%(user,string.join(msg.split()[2:]))
-            if self.space.twitter:
-                self.space.twitter.tweet(txt)
-                self.logged_msg(channel, msg + ": successful")
-            else:
-                self.logged_msg(channel, msg + ": failed")
 
         # Otherwise check to see if it is a message directed at me
         if msg.startswith(self.nickname + ":"):
@@ -138,12 +161,16 @@ class IRCBot(irc.IRCClient):
         Periodically executed tasks
         """
         self.logger.log("launched heardbeat task")
+        self.ping(self.factory.channel)
 
         #if Space changed
         if self.space.state_changed():
             self.logged_msg(self.space.irc_chan,
                             "The space is now: %s" % self.space.status()
                             )
+            self.topic("%s is %s: %s"%(self.space.name, self.space.status(), 
+                                       self.space.config['url'])
+                      )
             self.logger.log("Button:%s,Config:%s" % ( 
                 self.space.button_state(),
                 self.space.state()
@@ -156,7 +183,6 @@ class IRCBotFactory(protocol.ClientFactory):
 
     A new protocol instance will be created each time we connect to the server.
     """
-
     def __init__(self, space):
         self.channel = space.irc_chan
         self.filename = space.log_file
@@ -185,7 +211,7 @@ class twitterClient():
     A Twitter Client
     """
 
-    def __init__(self,auth,params):
+    def __init__(self,auth,params={}):
         consumer = oauth.OAuthConsumer(auth['ckey'],auth['csecret'])
         token = oauth.OAuthToken(auth['akey'], auth['asecret'])
 
@@ -204,11 +230,13 @@ class hackerspace():
     def __init__(self,args):
         self.json_file = args.json_file
         self.password = args.pw
+        self.admins = args.admin
 
         self.config = simplejson.load(open(self.json_file,'r'))
         self.load_json_config(self.config)
         self.occupied = self.config['open']
-        self.log_file = os.path.dirname(self.json_file)+self.username+".log"
+        self.log_file = os.path.dirname(self.json_file)+"/%s.log"%self.username
+        log.msg("Logfile: %s"%self.log_file)
 
         self._board = k8055.Board()
         self.client_init(args)
@@ -236,15 +264,19 @@ class hackerspace():
         if hasattr(args,'auth_file'):
             try:
                 auth=simplejson.load(open(args.auth_file,'r'))
-                self.twitter = twitterClient(args)
-            except:
-                log.err('Twitter could not be loaded')
+                self.twitter = twitterClient(auth)
+            except Exception, err:
+                log.err('Twitter could not be loaded:%s'%err)
                 self.twitter = False
         else:
             log.err('No Credentials for twitter loaded')
 
     def button_state(self):
-        self._board.read()
+        try:
+            self._board.read()
+        except k8066.BoardError as err:
+            log.err("Board Error, aborting: %s"%err)
+            sys.exit
         return not self._board.digital_inputs[4]
 
     def state(self):
@@ -266,7 +298,7 @@ class hackerspace():
 
     def update_twitter(self):
         if self.twitter:
-            self.twitter.tweet("%s is now %s!" % (self.name, self.status))
+            self.twitter.tweet("%s is now %s!" % (self.name, self.status()))
 
     def state_changed(self):
         if self.state() != self.button_state():
@@ -286,15 +318,16 @@ if __name__ == '__main__':
     log.startLogging(sys.stdout)
 
     parser = argparse.ArgumentParser(description='Process some integers.')
-    parser.add_argument('--tw_auth_file', dest='auth_file', action='store',
+    parser.add_argument('--auth_file', dest='auth_file', action='store',
                         default=None,
                         help='Twitter Authentication File')
     parser.add_argument('--json_file', dest='json_file', action='store',
                         default=None,
                         help='Space definition file')
-    parser.add_argument('--password', 
-                        dest='pw', 
-                        action='store',
+    parser.add_argument('--admin', dest='admin', action='append',
+                        default=[],
+                        help='Nickname of Admin (multiple invocations allowed)')
+    parser.add_argument('--password', dest='pw', action='store',
                         default=None,
                         help='Super Secret Password')
 
