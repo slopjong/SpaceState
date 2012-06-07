@@ -10,6 +10,7 @@ import time, sys, string, os, pprint
 from datetime import datetime as dt
 from urlparse import urlparse
 import Queue
+import base64
 
 # interface imports
 import k8055
@@ -63,7 +64,7 @@ class IRCBot(irc.IRCClient):
     def signedOn(self):
         """Called when bot has succesfully signed on to server."""
         self.join(self.factory.channel)
-        self.msg("Nickserv", "identify %s"%self.password)
+        self.msg("Nickserv", "identify %s"%base64.b64decode(self.password))
 
     def joined(self, channel):
         """This will get called when the bot joins the channel."""
@@ -75,7 +76,7 @@ class IRCBot(irc.IRCClient):
 
     def on_pm(self, user, channel, msg):
         if user not in self.space.admins:
-            response = "Hello, I'm the IRC bot for %s" % self.space.name
+            response = "Hello, I'm the IRC bot for %s, I'm afriad you're not allowed to do that, %s" % (self.space.name,user)
         # Allow authenticated users (see --admin flag) to tweet
         elif msg.startswith("tweet"):
             txt = "%s said: %s"%(user,string.join(msg.split()[1:]).strip())
@@ -239,7 +240,6 @@ class hackerspace():
     """
     def __init__(self,args):
         self.json_file = args.json_file
-        self.password = args.pw
         self.admins = args.admin
         self.msg_q = broadcast_queues()
 
@@ -270,21 +270,23 @@ class hackerspace():
             log.err("Cannot Load Space Configuration: %s"%err)
 
     def client_init(self,args):
+        #Twitter
+        if hasattr(args,'auth_file'):
+            try:
+                auth=simplejson.load(open(args.auth_file,'r'))
+                self.password = auth['ircreg']
+                self.admins += auth['admins']
+                self.twitter = twitterClient(auth)
+            except Exception, err:
+                log.err('Twitter could not be loaded (IRC might fail too):%s'%err)
+                self.twitter = False
+        else:
+            log.err('No Credentials for twitter loaded')
         # IRC
         self.irc_f = IRCBotFactory(self)
         reactor.connectTCP(self.irc_net,
                            6667,
                            self.irc_f)
-        #Twitter
-        if hasattr(args,'auth_file'):
-            try:
-                auth=simplejson.load(open(args.auth_file,'r'))
-                self.twitter = twitterClient(auth)
-            except Exception, err:
-                log.err('Twitter could not be loaded:%s'%err)
-                self.twitter = False
-        else:
-            log.err('No Credentials for twitter loaded')
 
     def button_state(self):
         try:
@@ -357,9 +359,6 @@ if __name__ == '__main__':
     parser.add_argument('--admin', dest='admin', action='append',
                         default=[],
                         help='Nickname of Admin (multiple invocations allowed)')
-    parser.add_argument('--password', dest='pw', action='store',
-                        default=None,
-                        help='Super Secret Password')
     parser.add_argument('--chan', dest='chan', action='store',
                         default=None,
                         help='IRC Channel override')
@@ -369,9 +368,9 @@ if __name__ == '__main__':
     if (args.json_file is None):
         log.err("Need JSON file")
         sys.exit()
-    
-    if (args.pw is None):
-        log.err("Need Password")
+
+    if (args.auth_file is None):
+        log.err("Need Auth file")
         sys.exit()
 
     print args
