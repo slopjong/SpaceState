@@ -1,0 +1,9 @@
+{
+    "ckey": "ooooooooooooooooo",
+    "csecret": "000000000000000000000000000000000000000000",
+    "akey": "oooooooooooooooooooooooooooooooooooooooooooo",
+    "asecret": "000000000000000000000000000000000000000000",
+    "ircreg": "00000000",
+    "admins": "[ "kingofspace" ]
+    "_notes": "ircreg is the base64 encoded password for the bots registered nick, if applicable"
+}    
