@@ -3,7 +3,7 @@ import cgi
 import simplejson
 
 print "Content-Type: text/json\n"
-content=simplejson.load(open("/opt/etc/spaceapid/farsetlabs.json",'r'))
+content=simplejson.load(open("/opt/etc/SpaceState/space.json",'r'))
 
 
 print simplejson.dumps(content)

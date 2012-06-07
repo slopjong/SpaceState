@@ -9,6 +9,7 @@ from twisted.python import log
 import time, sys, string, os, pprint
 from datetime import datetime as dt
 from urlparse import urlparse
+import Queue
 
 # interface imports
 import k8055
@@ -43,7 +44,6 @@ class IRCBot(irc.IRCClient):
         self.logger = MessageLogger(open(self.factory.filename, "a"))
         self.logger.log("[connected at %s]" %
                         time.asctime(time.localtime(time.time())))
-        self.loopcall.start(10.0)
 
     def connectionLost(self, reason):
         irc.IRCClient.connectionLost(self, reason)
@@ -68,6 +68,10 @@ class IRCBot(irc.IRCClient):
     def joined(self, channel):
         """This will get called when the bot joins the channel."""
         self.logger.log("[I have joined %s]" % channel)
+        #IRC Keepalive
+        self.startHeartbeat()
+        #Custom heartbeat
+        self.loopcall.start(5.0)
 
     def on_pm(self, user, channel, msg):
         if user not in self.space.admins:
@@ -75,14 +79,13 @@ class IRCBot(irc.IRCClient):
         # Allow authenticated users (see --admin flag) to tweet
         elif msg.startswith("tweet"):
             txt = "%s said: %s"%(user,string.join(msg.split()[1:]).strip())
-            if self.space.twitter:
-                if user in self.space.admins:
-                    self.space.twitter.tweet(txt)
-                    response = "tweet \"%s\" successful"%txt
-                else:
-                    response = "You attemped an unauthorised command. Please don't do that. Thank you."
-            else:
-                response = "failed, twitter not configured"
+            self.space.msg_q.add(txt,tweet=True,irc=False)
+            response = "your message has been queued"
+        # Allow authenticated users (see --admin flag) to tweet
+        elif msg.startswith("speak"):
+            txt = "%s said: %s"%(user,string.join(msg.split()[1:]).strip())
+            self.space.msg_q.add(txt,tweet=False,irc=True)
+            response = "your message has been queued"
         else:
             response = "Successfully authenticated: %s"%(pprint.pformat(self.space.config))
 
@@ -160,21 +163,12 @@ class IRCBot(irc.IRCClient):
         """
         Periodically executed tasks
         """
-        self.logger.log("launched heardbeat task")
-        self.ping(self.factory.channel)
-
-        #if Space changed
-        if self.space.state_changed():
-            self.logged_msg(self.space.irc_chan,
-                            "The space is now: %s" % self.space.status()
-                            )
+        #Launch Space heartbeat
+        delta = self.space.heartbeat()
+        if delta:
             self.topic("%s is %s: %s"%(self.space.name, self.space.status(), 
-                                       self.space.config['url'])
-                      )
-            self.logger.log("Button:%s,Config:%s" % ( 
-                self.space.button_state(),
-                self.space.state()
-            ))
+                                   self.space.config['url']))
+
 
 
 
@@ -192,6 +186,7 @@ class IRCBotFactory(protocol.ClientFactory):
         p = IRCBot()
         p.factory = self
         p.space = self.space
+        self.space.irc = p
         p.loopcall = task.LoopingCall(p.heartbeat)
         p.nickname = self.space.username
         p.password = self.space.password
@@ -220,8 +215,23 @@ class twitterClient():
 
     def tweet(self,msg,params={}):
         params = dict(self.params.items() + params.items())
-        self.client.update(msg,params)
+        log.msg(self.client.update(msg,params))
 
+class broadcast_queues():
+    """
+    Custom Class with multiple queues to handle async twitter/irc
+    """
+    def __init__(self):
+        self.irc = Queue.Queue()
+        self.twitter = Queue.Queue()
+
+    def add(self,txt,irc=True,tweet=False):
+        if irc:
+            self.irc.put(txt)
+        if tweet:
+            self.twitter.put(txt)
+
+        log.msg("Queued %s;T:%s;I:%s"%(txt,tweet,irc))
 
 class hackerspace():
     """
@@ -231,12 +241,17 @@ class hackerspace():
         self.json_file = args.json_file
         self.password = args.pw
         self.admins = args.admin
+        self.msg_q = broadcast_queues()
 
         self.config = simplejson.load(open(self.json_file,'r'))
         self.load_json_config(self.config)
         self.occupied = self.config['open']
         self.log_file = os.path.dirname(self.json_file)+"/%s.log"%self.username
         log.msg("Logfile: %s"%self.log_file)
+
+        #overrides
+        if hasattr(args,'chan'):
+            self.irc_chan="#%s"%args.chan
 
         self._board = k8055.Board()
         self.client_init(args)
@@ -250,7 +265,7 @@ class hackerspace():
                 self.username = re.sub(r'\s','',self.name)
             irc = urlparse(conf['contact']['irc'])
             self.irc_net = irc.netloc
-            self.irc_chan = string.strip(irc.path,'/#')
+            self.irc_chan = string.strip(irc.path,'/')
         except KeyError as err:
             log.err("Cannot Load Space Configuration: %s"%err)
 
@@ -283,7 +298,7 @@ class hackerspace():
         return self.occupied
 
     def status(self):
-        return "Open" if self.state() else "Closed"
+        return "open" if self.state() else "closed"
 
     def update_json(self):
         self.config['open']=self.state()
@@ -296,22 +311,37 @@ class hackerspace():
                         )
 
 
-    def update_twitter(self):
-        if self.twitter:
-            self.twitter.tweet("%s is now %s!" % (self.name, self.status()))
-
     def state_changed(self):
         if self.state() != self.button_state():
             self.occupied = self.button_state()
+            s = int(dt.strftime(dt.utcnow(),"%s")) - int(self.config['lastchange'])
+            hours, remainder = divmod(s, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            if hours > 0:
+                delta = '%s hrs, %s mins' % (hours, minutes)
+            else:
+                delta = '%s mins, %s secs' % (minutes, seconds)
+            self.msg_q.add("%s is now %s after %s" % (self.name,
+                                                      self.status(),
+                                                      delta)
+                           ,tweet=True,irc=True)
             self.update_json()
-            self.update_twitter()
             return True
         else:
             return False
 
-    def run_if_changed(self,f):
-        if self.state_changed():
-            f(self.state())
+    def heartbeat(self):
+        self.state_changed()
+        #Send any queued tweets and post one at a time
+        if not self.msg_q.twitter.empty() and self.twitter:
+            self.twitter.tweet(self.msg_q.twitter.get())
+            self.msg_q.twitter.task_done()
+
+        #pick up all queued irc queued messages from the space
+        if not self.msg_q.irc.empty():
+            msg=self.msg_q.irc.get_nowait()
+            self.irc.logged_msg(self.irc_chan,msg)
+            self.msg_q.irc.task_done()
 
 if __name__ == '__main__':
     # initialize logging
@@ -330,6 +360,9 @@ if __name__ == '__main__':
     parser.add_argument('--password', dest='pw', action='store',
                         default=None,
                         help='Super Secret Password')
+    parser.add_argument('--chan', dest='chan', action='store',
+                        default=None,
+                        help='IRC Channel override')
 
     args = parser.parse_args()
 

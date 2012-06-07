@@ -36,3 +36,4 @@ nosetests.xml
 .json
 *_auth.json
 *.log
+*.swp
